@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# (c) 2015 Mikel Arregi - AvanzOSC
-# (c) 2015 Oihane Crucelaegui - AvanzOSC
+# © 2015 Mikel Arregi - AvanzOSC
+# © 2015 Oihane Crucelaegui - AvanzOSC
 # License AGPL-3 - See http://www.gnu.org/licenses/agpl-3.0.html
 
 from openerp import api, exceptions, fields, models, _
@@ -69,7 +69,7 @@ class MrpProduction(models.Model):
         self.ensure_one()
         pack_lines = []
         lines = self.env['mrp.bom.line'].search(
-            ['|', ('product_template', '=', self.product_template.id),
+            ['|', ('product_tmpl_id', '=', self.product_tmpl_id.id),
              ('product_id', '=', self.product_id.id)])
         exist_prod = [x.product.id for x in self.pack]
         for line in lines:
@@ -85,13 +85,15 @@ class MrpProduction(models.Model):
     @api.one
     def recalculate_product_qty(self, qty, product):
         line = self.product_lines.filtered(
-            lambda x: x.product_id == product)
+            lambda x: x.product_id == product or
+            x.product_tmpl_id == product.product_tmpl_id)
         line.write({'product_qty': qty})
 
     @api.one
     def assign_parent_lot(self, production):
         line = self.product_lines.filtered(
-            lambda x: x.product_id == production.product_id)
+            lambda x: x.product_id == production.product_id or
+            x.product_tmpl_id == production.product_id.product_tmpl_id)
         line.write({'lot': (
                     production.move_created_ids2 and
                     production.move_created_ids2[0].restrict_lot_id.id or
@@ -101,14 +103,17 @@ class MrpProduction(models.Model):
         equal_uom = op_line.product.uom_id.id == self.product_id.uom_id.id
         final_product_qty = equal_uom and op_line.fill or op_line.qty
         data = self.product_id_change(op_line.product.id, final_product_qty)
-        if 'product_attributes' in data['value']:
-            product_attributes = map(lambda x: (0, 0, x),
-                                     data['value']['product_attributes'])
-            data['value'].update({'product_attributes': product_attributes})
         name = self.env['ir.sequence'].get('mrp.production.packaging')
         data['value'].update({'product_id': op_line.product.id,
+                              'product_tmpl_id':
+                              op_line.product.product_tmpl_id.id,
                               'product_qty': final_product_qty,
                               'name': name})
+        try:
+            data['value'].update({'project_id': self.project_id.id})
+        except:
+            # This is in case mrp_project module is installed
+            pass
         return data['value']
 
     @api.one
@@ -129,7 +134,7 @@ class MrpProduction(models.Model):
                         raw_product, op.qty, workorder)
                     linked_raw_products.append(value)
             for line in new_op.product_lines:
-                if self.product_id.product_tmpl_id == line.product_template:
+                if self.product_id.product_tmpl_id == line.product_tmpl_id:
                     if new_op.product_id.track_all or\
                             new_op.product_id.track_production:
                         for move in self.move_created_ids2:
@@ -157,6 +162,67 @@ class MrpProduction(models.Model):
             return super(MrpProduction, self).action_compute(properties)
         else:
             raise exceptions.Warning(_('You can not compute again the list.'))
+
+    @api.multi
+    def scrap_qty_left(self):
+        self.ensure_one()
+        if self.left_product_qty <= 0:
+            raise exceptions.Warning(_('You can not scrap negative quantity.'))
+        view_id = self.env.ref(
+            'stock.view_stock_move_scrap_wizard')
+        return {
+            'view_type': 'form',
+            'view_mode': 'tree',
+            'res_model': 'stock.move.scrap',
+            'views': [(view_id.id, 'form')],
+            'view_id': False,
+            'type': 'ir.actions.act_window',
+            'target': 'new',
+            'context': self.with_context(
+                active_ids=self.move_created_ids2.ids,
+                active_id=self.move_created_ids2[:1].id,
+                qty_left=self.left_product_qty).env.context,
+        }
+
+    @api.multi
+    def produce_qty_left(self):
+        self.ensure_one()
+        if self.left_product_qty >= 0:
+            raise exceptions.Warning(_('You have enough quantity to package.'))
+        self._make_left_qty_produce_line()
+        self.action_produce(self.id, abs(self.left_product_qty),
+                            'consume_produce')
+
+    @api.multi
+    def _make_left_qty_produce_line(self):
+        self.ensure_one()
+        source_location_id = self.product_id.property_stock_production.id
+        destination_location_id = self.location_dest_id.id
+        procurement = self.env['procurement.order'].search(
+            [('production_id', '=', self.id)])
+        data = {
+            'name': self.name,
+            'date': self.date_planned,
+            'product_id': self.product_id.id,
+            'product_uom': self.product_uom.id,
+            'product_uom_qty': abs(self.left_product_qty),
+            'product_uos_qty': (
+                self.product_uos and self.product_uos_qty or False),
+            'product_uos': self.product_uos and self.product_uos.id or False,
+            'location_id': source_location_id,
+            'location_dest_id': destination_location_id,
+            'move_dest_id': self.move_prod_id.id,
+            'procurement_id': procurement[:1].id,
+            'company_id': self.company_id.id,
+            'production_id': self.id,
+            'origin': self.name,
+            'group_id': procurement[:1].group_id.id,
+            'restrict_lot_id': (
+                self.move_created_ids2[:1].restrict_lot_id.id or
+                self.move_created_ids2[:1].lot_ids[:1].id),
+        }
+        move = self.env['stock.move'].create(data)
+        move.action_confirm()
 
 
 class PackagingOperation(models.Model):
@@ -220,3 +286,9 @@ class PackagingOperation(models.Model):
     package_product = fields.Many2one(
         comodel_name='product.product', string='Package Product',
         compute='_compute_package_product')
+
+    @api.multi
+    def write(self, values):
+        ''' Do not change data if there is a related packaging order '''
+        super(PackagingOperation,
+              self.filtered(lambda x: not x.processed)).write(values)
