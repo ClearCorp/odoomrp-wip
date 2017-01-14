@@ -59,7 +59,10 @@ class StockInventory(models.Model):
                     product = line.product
                 lot_id = None
                 if line.lot:
-                    lot_lst = stk_lot_obj.search([('name', '=', line.lot)])
+                    lot_lst = stk_lot_obj.search([
+                        ('name', '=', line.lot),
+                        ('product_id', '=', product.id),
+                    ])
                     if lot_lst:
                         lot_id = lot_lst[0].id
                     else:
@@ -83,4 +86,4 @@ class StockInventory(models.Model):
                 raise exceptions.Warning(
                     _("Loaded lines must be processed at least one time for "
                       "inventory : %s") % (inventory.name))
-            super(StockInventory, inventory).action_done()
+        return super(StockInventory, self).action_done()

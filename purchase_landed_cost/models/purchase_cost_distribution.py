@@ -1,22 +1,12 @@
 # -*- coding: utf-8 -*-
-##############################################################################
-#
-#    This program is free software: you can redistribute it and/or modify
-#    it under the terms of the GNU Affero General Public License as
-#    published by the Free Software Foundation, either version 3 of the
-#    License, or (at your option) any later version.
-#
-#    This program is distributed in the hope that it will be useful,
-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#    GNU Affero General Public License for more details.
-#
-#    You should have received a copy of the GNU Affero General Public License
-#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-#
-##############################################################################
+# © 2013 Joaquín Gutierrez
+# © 2014-2016 Pedro M. Baeza <pedro.baeza@tecnativa.com>
+# License AGPL-3 - See http://www.gnu.org/licenses/agpl-3
+
 
 from openerp import models, fields, exceptions, api, _
+# NOTE: In v9, this should be `from openerp.tools.misc import formatLang`
+from .format_lang_wrapper import formatLang
 import openerp.addons.decimal_precision as dp
 
 
@@ -254,13 +244,14 @@ class PurchaseCostDistribution(models.Model):
                 domain_quant = [
                     ('product_id', 'in',
                      product.product_tmpl_id.product_variant_ids.ids),
-                    ('id', 'not in', move.quant_ids.ids)]
-                quants = self.env['stock.quant'].read_group(
-                    domain_quant, ['product_id', 'qty', 'cost'], [])[0]
+                    ('id', 'not in', move.quant_ids.ids),
+                    ('location_id.usage', '=', 'internal')]
+                quants = self.env['stock.quant'].search(domain_quant)
+                current_valuation = sum([(q.cost * q.qty) for q in quants])
                 # Get the standard price
-                new_std_price = ((quants['cost'] * quants['qty'] +
-                                  new_price * move.product_qty) /
-                                 qty_available)
+                new_std_price = (
+                    (current_valuation + new_price * move.product_qty) /
+                    qty_available)
             # Write the standard price, as SUPERUSER_ID, because a
             # warehouse manager may not have the right to write on products
             product.sudo().write({'standard_price': new_std_price})
@@ -368,9 +359,10 @@ class PurchaseCostDistributionLine(models.Model):
         string='Name', compute='_compute_display_name')
     distribution = fields.Many2one(
         comodel_name='purchase.cost.distribution', string='Cost distribution',
-        ondelete='cascade')
+        ondelete='cascade', required=True)
     move_id = fields.Many2one(
-        comodel_name='stock.move', string='Picking line', ondelete="restrict")
+        comodel_name='stock.move', string='Picking line', ondelete="restrict",
+        required=True)
     purchase_line_id = fields.Many2one(
         comodel_name='purchase.order.line', string='Purchase order line',
         related='move_id.purchase_line_id')
@@ -400,8 +392,7 @@ class PurchaseCostDistributionLine(models.Model):
         string='Unit price', related='move_id.price_unit')
     expense_lines = fields.One2many(
         comodel_name='purchase.cost.distribution.line.expense',
-        inverse_name='distribution_line', string='Expenses distribution lines',
-        ondelete='cascade')
+        inverse_name='distribution_line', string='Expenses distribution lines')
     product_volume = fields.Float(
         string='Volume', help="The volume in m3.",
         related='product_id.product_tmpl_id.volume')
@@ -436,6 +427,10 @@ class PurchaseCostDistributionLine(models.Model):
     total_volume = fields.Float(
         compute=_compute_total_volume, string='Line volume', store=True,
         help="The line volume in m3.")
+    company_id = fields.Many2one(
+        comodel_name="res.company", related="distribution.company_id",
+        store=True,
+    )
 
     @api.multi
     def name_get(self):
@@ -463,12 +458,16 @@ class PurchaseCostDistributionLineExpense(models.Model):
         string='Expense amount', default=0.0,
         digits_compute=dp.get_precision('Account'))
     cost_ratio = fields.Float('Unit cost', default=0.0)
+    company_id = fields.Many2one(
+        comodel_name="res.company", related="distribution_line.company_id",
+        store=True,
+    )
 
 
 class PurchaseCostDistributionExpense(models.Model):
     _name = "purchase.cost.distribution.expense"
     _description = "Purchase cost distribution expense"
-    _rec_name = "type"
+    _rec_name = "display_name"
 
     @api.one
     @api.depends('distribution', 'distribution.cost_lines')
@@ -505,6 +504,19 @@ class PurchaseCostDistributionExpense(models.Model):
                "('invoice_id.state', 'in', ('open', 'paid'))]")
     invoice_id = fields.Many2one(
         comodel_name='account.invoice', string="Invoice")
+    display_name = fields.Char(compute="_compute_display_name", store=True)
+    company_id = fields.Many2one(
+        comodel_name="res.company", related="distribution.company_id",
+        store=True,
+    )
+
+    @api.one
+    @api.depends('distribution', 'type', 'expense_amount')
+    def _compute_display_name(self):
+        self.display_name = "%s: %s (%s)" % (
+            self.distribution.name, self.type.name,
+            formatLang(self.env, self.expense_amount,
+                       currency_obj=self.distribution.currency_id))
 
     @api.onchange('type')
     def onchange_type(self):
